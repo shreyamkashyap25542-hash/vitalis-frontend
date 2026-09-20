@@ -347,10 +347,6 @@ function App() {
           <button className="nav-item" onClick={() => setShowSettings(true)}>
             <Settings size={18} /><span>Settings</span>
           </button>
-          <div className="system-state">
-            <span className="live-dot" />
-            <div><strong>System online</strong><small>All services operational</small></div>
-          </div>
         </div>
       </aside>
 
