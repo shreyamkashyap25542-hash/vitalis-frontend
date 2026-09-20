@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Activity,
@@ -99,14 +99,29 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [eventFilter, setEventFilter] = useState("ALL");
-  const [scrollY, setScrollY] = useState(0);
   const [events, setEvents] = useState(initialEvents);
+  const heroRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
-    const onScroll = () => setScrollY(window.scrollY);
-    window.addEventListener("scroll", onScroll);
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
+    let rafId: number;
+    let lastScrollY = -1;
+    const update = () => {
+      if (heroRef.current) {
+        if (active === "Dashboard") {
+          const y = window.scrollY;
+          if (y !== lastScrollY) {
+            lastScrollY = y;
+            heroRef.current.style.opacity = String(Math.max(0, 1 - y / 500));
+          }
+        } else {
+          heroRef.current.style.opacity = "0";
+        }
+      }
+      rafId = requestAnimationFrame(update);
+    };
+    rafId = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(rafId);
+  }, [active]);
 
   useEffect(() => {
     if (!running) return;
@@ -137,11 +152,7 @@ function App() {
   function navigate(item: string) {
     setActive(item);
     setMobileOpen(false);
-    if (item !== "Dashboard") {
-      window.setTimeout(() => {
-        document.getElementById("main-content")?.scrollIntoView({ behavior: "smooth" });
-      }, 0);
-    }
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function resetSimulation() {
@@ -154,18 +165,140 @@ function App() {
   }
 
   function activateScenario(name: string) {
+    if (name === "Normal Operations") {
+      setResources(initialResources);
+      setPatients(initialPatients);
+      setScenario("Normal Operations");
+      const now = new Date().toLocaleTimeString([], { hour12: false });
+      setEvents((cur) => [
+        { id: Date.now(), type: "RECOVERY", text: "Normal Operations restored — all resources and queue reset to baseline", time: now },
+        ...cur,
+      ]);
+      return;
+    }
+
     setScenario(name);
     setRunning(true);
     const now = new Date().toLocaleTimeString([], { hour12: false });
-    setEvents((current) => [
-      {
-        id: Date.now(),
-        type: "ARRIVAL",
-        text: `${name} activated — simulation conditions updated`,
-        time: now,
-      },
-      ...current,
-    ]);
+
+    if (name === "Emergency Surge") {
+      setResources((cur) => cur.map((r) =>
+        r.name === "Ambulances" ? { ...r, used: Math.min(r.total, r.used + 3) }
+          : r.name === "Beds" ? { ...r, used: Math.min(r.total, r.used + 4) }
+            : r
+      ));
+      setPatients((cur) => [
+        { id: "P-1055", urgency: 1, wait: 0, resources: ["ICU Bed", "Doctor"], score: 99, arrival: now.slice(0, 5), status: "Waiting" as const },
+        { id: "P-1056", urgency: 2, wait: 0, resources: ["Bed", "Doctor"], score: 95, arrival: now.slice(0, 5), status: "Waiting" as const },
+        { id: "P-1057", urgency: 1, wait: 0, resources: ["OR", "Doctor", "Nurse"], score: 98, arrival: now.slice(0, 5), status: "Waiting" as const },
+        ...cur,
+      ]);
+      setEvents((cur) => [
+        { id: Date.now() + 2, type: "ARRIVAL", text: "P-1057 — mass casualty arrival, critical trauma", time: now },
+        { id: Date.now() + 1, type: "ARRIVAL", text: "P-1056 — ambulance arrival, high urgency", time: now },
+        { id: Date.now(), type: "ARRIVAL", text: "Emergency Surge — 3 critical patients added, ambulances at +3", time: now },
+        ...cur,
+      ]);
+    }
+
+    else if (name === "Staff Shortage") {
+      setResources((cur) => cur.map((r) =>
+        r.name === "Doctors" ? { ...r, used: Math.max(0, r.used - 5) }
+          : r.name === "Nurses" ? { ...r, used: Math.max(0, r.used - 6) }
+            : r
+      ));
+      setPatients((cur) => cur.map((p) => ({ ...p, wait: p.wait + 8, score: Math.max(10, p.score - 12) })));
+      setEvents((cur) => [
+        { id: Date.now() + 1, type: "RESOURCE_FAILURE", text: "5 doctors and 6 nurses pulled from active duty", time: now },
+        { id: Date.now(), type: "RESOURCE_FAILURE", text: "Staff Shortage — patient wait times increasing across all queues", time: now },
+        ...cur,
+      ]);
+    }
+
+    else if (name === "Resource Failure") {
+      setResources((cur) => cur.map((r) =>
+        r.name === "Operating Rooms" ? { ...r, total: Math.max(r.used, r.total - 2), used: Math.max(0, r.used - 1) }
+          : r.name === "ICU Beds" ? { ...r, total: Math.max(r.used, r.total - 1) }
+            : r
+      ));
+      setPatients((cur) => cur.map((p) =>
+        p.resources.includes("OR") ? { ...p, wait: p.wait + 15, score: Math.max(5, p.score - 18) } : p
+      ));
+      setEvents((cur) => [
+        { id: Date.now() + 1, type: "RESOURCE_FAILURE", text: "ICU-02 taken offline — maintenance fault detected", time: now },
+        { id: Date.now(), type: "RESOURCE_FAILURE", text: "OR-03 and OR-04 offline — critical equipment failure", time: now },
+        ...cur,
+      ]);
+    }
+
+    else if (name === "Queue Jump") {
+      setPatients((cur) => [...cur].sort((a, b) => a.urgency - b.urgency || b.wait - a.wait));
+      setEvents((cur) => [
+        { id: Date.now(), type: "ASSIGNED", text: "Queue Jump — patients re-sorted: urgency-first, then longest wait", time: now },
+        ...cur,
+      ]);
+    }
+
+    else if (name === "ICU Contention") {
+      setResources((cur) => cur.map((r) =>
+        r.name === "ICU Beds" ? { ...r, used: r.total } : r
+      ));
+      setPatients((cur) => cur.map((p) =>
+        p.resources.includes("ICU Bed") ? { ...p, wait: p.wait + 20, score: Math.max(5, p.score - 20) } : p
+      ));
+      setEvents((cur) => [
+        { id: Date.now() + 1, type: "RESOURCE_FAILURE", text: "All ICU beds at capacity — new critical patients diverting", time: now },
+        { id: Date.now(), type: "ARRIVAL", text: "ICU Contention — patients requiring ICU experiencing extended delays", time: now },
+        ...cur,
+      ]);
+    }
+
+    else if (name === "Starvation") {
+      setPatients((cur) => cur.map((p) =>
+        p.urgency >= 4 ? { ...p, wait: p.wait + 30, score: Math.max(5, p.score - 25) } : p
+      ));
+      setEvents((cur) => [
+        { id: Date.now(), type: "ARRIVAL", text: "Starvation — low-priority patients waiting 30+ min, risk of deterioration", time: now },
+        ...cur,
+      ]);
+    }
+
+    else if (name === "Surge Demo") {
+      setResources((cur) => cur.map((r) => ({ ...r, used: Math.min(r.total, Math.round(r.total * 0.88)) })));
+      setPatients((cur) => [
+        { id: "P-1060", urgency: 2, wait: 0, resources: ["Bed", "Doctor"], score: 91, arrival: now.slice(0, 5), status: "Waiting" as const },
+        { id: "P-1061", urgency: 3, wait: 0, resources: ["Nurse"], score: 80, arrival: now.slice(0, 5), status: "Waiting" as const },
+        { id: "P-1062", urgency: 1, wait: 0, resources: ["ICU Bed", "Doctor"], score: 97, arrival: now.slice(0, 5), status: "Waiting" as const },
+        { id: "P-1063", urgency: 2, wait: 0, resources: ["OR", "Nurse"], score: 88, arrival: now.slice(0, 5), status: "Waiting" as const },
+        ...cur,
+      ]);
+      setEvents((cur) => [
+        { id: Date.now() + 1, type: "ARRIVAL", text: "Surge Demo — 4 patients admitted, all resources at ~88% capacity", time: now },
+        { id: Date.now(), type: "ASSIGNED", text: "Auto-allocating surge patients by priority score", time: now },
+        ...cur,
+      ]);
+    }
+
+    else if (name === "Full Demo") {
+      setResources((cur) => cur.map((r) =>
+        r.name === "ICU Beds" ? { ...r, used: r.total }
+          : r.name === "Operating Rooms" ? { ...r, total: r.total - 1, used: Math.min(r.used, r.total - 1) }
+            : { ...r, used: Math.min(r.total, Math.round(r.total * 0.92)) }
+      ));
+      setPatients((cur) => [
+        { id: "P-1070", urgency: 1, wait: 0, resources: ["ICU Bed", "Doctor"], score: 100, arrival: now.slice(0, 5), status: "Waiting" as const },
+        { id: "P-1071", urgency: 2, wait: 0, resources: ["Bed", "Nurse"], score: 93, arrival: now.slice(0, 5), status: "Waiting" as const },
+        { id: "P-1072", urgency: 1, wait: 0, resources: ["OR", "Doctor"], score: 99, arrival: now.slice(0, 5), status: "Waiting" as const },
+        ...cur.map((p) => ({ ...p, wait: p.wait + 5 })),
+      ]);
+      setEvents((cur) => [
+        { id: Date.now() + 3, type: "RESOURCE_FAILURE", text: "OR-05 offline — electrical fault detected", time: now },
+        { id: Date.now() + 2, type: "ARRIVAL", text: "P-1072 — critical surgical emergency admitted", time: now },
+        { id: Date.now() + 1, type: "ARRIVAL", text: "P-1070 — cardiac arrest, immediate ICU required", time: now },
+        { id: Date.now(), type: "ASSIGNED", text: "Full Demo — compound crisis simulation running", time: now },
+        ...cur,
+      ]);
+    }
   }
 
   function exportEvents() {
@@ -181,6 +314,8 @@ function App() {
     a.click();
     URL.revokeObjectURL(url);
   }
+
+  const isDashboard = active === "Dashboard";
 
   return (
     <div className="app-shell">
@@ -244,98 +379,117 @@ function App() {
         </header>
 
         <section
+          ref={heroRef}
           className="hero"
           style={{
-            backgroundImage: "linear-gradient(90deg, rgba(247,251,251,.98) 0%, rgba(247,251,251,.87) 45%, rgba(247,251,251,.48) 100%), url('/hospital-bg.svg')",
-            opacity: Math.max(0.05, 1 - scrollY / 900),
-            transform: `translateY(${scrollY * 0.03}px)`,
+            backgroundImage: "linear-gradient(90deg, rgba(247,251,251,.82) 0%, rgba(247,251,251,.55) 45%, rgba(247,251,251,.18) 100%), url('/dist/assets/hospital_image.jpeg')",
+            opacity: isDashboard ? undefined : 0,
+            pointerEvents: isDashboard ? undefined : "none",
           }}
         />
 
         <div id="main-content" className="content">
-          <section className="hero-copy">
-            <div className="eyebrow"><span /> LIVE HOSPITAL RESOURCE SIMULATOR</div>
-            <h1>Optimize Today for <span>Healthier Tomorrows</span></h1>
-            <p className="hero-sub">Model patient flow, allocate scarce resources, and adapt hospital operations in real time.</p>
-            <div className="hero-motto">
-              <span>Simulate</span><i>•</i><span>Allocate</span><i>•</i><span>Adapt</span>
-            </div>
-          </section>
 
-          <section className="control-strip">
-            <div className="control-group">
-              <span className="control-label">SIMULATION</span>
-              <div className="button-row">
-                <button className="primary-btn" onClick={() => setRunning(true)}><Play size={15} /> Start</button>
-                <button className="soft-btn" onClick={() => setRunning(false)}><Pause size={15} /> Pause</button>
-                <button className="soft-btn" onClick={() => setRunning(true)}><Play size={15} /> Resume</button>
-                <button className="soft-btn" onClick={resetSimulation}><RotateCcw size={15} /> Reset</button>
+          {/* ── Dashboard hero text ── */}
+          {isDashboard && (
+            <section className="hero-copy">
+              <div className="eyebrow"><span /> LIVE HOSPITAL RESOURCE SIMULATOR</div>
+              <h1>Optimize Today for <span>Healthier Tomorrows</span></h1>
+              <p className="hero-sub"></p>
+              <div className="hero-motto">
+                <span>Simulate</span><i>•</i><span>Allocate</span><i>•</i><span>Adapt</span>
               </div>
-            </div>
-            <div className="divider" />
-            <div className="control-group">
-              <span className="control-label">SPEED</span>
-              <div className="speed-row">
-                {[0.5, 1, 2, 4].map((value) => (
-                  <button key={value} className={speed === value ? "speed active" : "speed"} onClick={() => setSpeed(value)}>
-                    {value}x
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="sim-clock">
-              <Timer size={17} />
-              <div><span>SIMULATION TIME</span><strong>{String(Math.floor(time / 60)).padStart(2, "0")}:{String(time % 60).padStart(2, "0")}</strong></div>
-              <span className={`run-status ${running ? "running" : ""}`}>{running ? "RUNNING" : "PAUSED"}</span>
-            </div>
-          </section>
+            </section>
+          )}
 
-          <section className="stats-grid">
-            <Stat icon={<CheckCircle2 />} label="Patients Treated" value="51" meta="+8 today" />
-            <Stat icon={<Clock3 />} label="Currently Waiting" value={String(patients.length)} meta="Queue active" />
-            <Stat icon={<Activity />} label="In Treatment" value="5" meta="Active cases" />
-            <Stat icon={<Zap />} label="Interrupted" value="1" meta="This simulation" />
-            <Stat icon={<Timer />} label="Avg Wait Time" value={`${avgWait}m`} meta="Target < 15m" />
-            <Stat icon={<Gauge />} label="P95 Wait Time" value={`${p95}m`} meta="Target < 30m" />
-          </section>
-
-          <section className="section-block">
-            <SectionHeader title="Patient Queue" subtitle="Live priority queue based on selected allocation strategy" />
-            <Panel>
-              <div className="table-toolbar">
-                <div className="strategy-pill"><span>Strategy</span><b>{strategy}</b></div>
-                <div className="queue-summary"><span><i className="dot green" /> {patients.length} waiting</span><span><i className="dot orange" /> {patients.filter(p => p.wait > 20).length} at risk</span></div>
-              </div>
-              <PatientTable patients={patients} onView={setSelectedPatient} />
-            </Panel>
-          </section>
-
-          <section className="section-block">
-            <SectionHeader title="Currently in Treatment" subtitle="Patients actively consuming hospital resources" />
-            <Panel>
-              <div className="treatment-grid">
-                {treatmentPatients.map((patient) => (
-                  <div className="treatment-card" key={patient.id}>
-                    <div className="treatment-top"><span className="patient-id">{patient.id}</span><span className="progress-label">{patient.progress}%</span></div>
-                    <div className="progress-track"><div className="progress-fill" style={{ width: `${patient.progress}%` }} /></div>
-                    <div className="treatment-info"><div><small>Department</small><b>{patient.department}</b></div><div><small>Resource</small><b>{patient.resource}</b></div><div><small>Doctor</small><b>{patient.doctor}</b></div></div>
+          {/* ── Simulation: controls + stats ── */}
+          {(isDashboard || active === "Simulation") && (
+            <>
+              <section className="control-strip">
+                <div className="control-group">
+                  <span className="control-label">SIMULATION</span>
+                  <div className="button-row">
+                    <button className="primary-btn" onClick={() => setRunning(true)}><Play size={15} /> Start</button>
+                    <button className="soft-btn" onClick={() => setRunning(false)}><Pause size={15} /> Pause</button>
+                    <button className="soft-btn" onClick={() => setRunning(true)}><Play size={15} /> Resume</button>
+                    <button className="soft-btn" onClick={resetSimulation}><RotateCcw size={15} /> Reset</button>
                   </div>
+                </div>
+                <div className="divider" />
+                <div className="control-group">
+                  <span className="control-label">SPEED</span>
+                  <div className="speed-row">
+                    {[0.5, 1, 2, 4].map((value) => (
+                      <button key={value} className={speed === value ? "speed active" : "speed"} onClick={() => setSpeed(value)}>
+                        {value}x
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="sim-clock">
+                  <Timer size={17} />
+                  <div><span>SIMULATION TIME</span><strong>{String(Math.floor(time / 60)).padStart(2, "0")}:{String(time % 60).padStart(2, "0")}</strong></div>
+                  <span className={`run-status ${running ? "running" : ""}`}>{running ? "RUNNING" : "PAUSED"}</span>
+                </div>
+              </section>
+
+              <section className="stats-grid">
+                <Stat icon={<CheckCircle2 />} label="Patients Treated" value="51" meta="+8 today" />
+                <Stat icon={<Clock3 />} label="Currently Waiting" value={String(patients.length)} meta="Queue active" />
+                <Stat icon={<Activity />} label="In Treatment" value="5" meta="Active cases" />
+                <Stat icon={<Zap />} label="Interrupted" value="1" meta="This simulation" />
+                <Stat icon={<Timer />} label="Avg Wait Time" value={`${avgWait}m`} meta="Target < 15m" />
+                <Stat icon={<Gauge />} label="P95 Wait Time" value={`${p95}m`} meta="Target < 30m" />
+              </section>
+            </>
+          )}
+
+          {/* ── Patients ── */}
+          {(isDashboard || active === "Patients") && (
+            <>
+              <section className="section-block">
+                <SectionHeader title="Patient Queue" subtitle="Live priority queue based on selected allocation strategy" />
+                <Panel>
+                  <div className="table-toolbar">
+                    <div className="strategy-pill"><span>Strategy</span><b>{strategy}</b></div>
+                    <div className="queue-summary"><span><i className="dot green" /> {patients.length} waiting</span><span><i className="dot orange" /> {patients.filter(p => p.wait > 20).length} at risk</span></div>
+                  </div>
+                  <PatientTable patients={patients} onView={setSelectedPatient} />
+                </Panel>
+              </section>
+
+              <section className="section-block">
+                <SectionHeader title="Currently in Treatment" subtitle="Patients actively consuming hospital resources" />
+                <Panel>
+                  <div className="treatment-grid">
+                    {treatmentPatients.map((patient) => (
+                      <div className="treatment-card" key={patient.id}>
+                        <div className="treatment-top"><span className="patient-id">{patient.id}</span><span className="progress-label">{patient.progress}%</span></div>
+                        <div className="progress-track"><div className="progress-fill" style={{ width: `${patient.progress}%` }} /></div>
+                        <div className="treatment-info"><div><small>Department</small><b>{patient.department}</b></div><div><small>Resource</small><b>{patient.resource}</b></div><div><small>Doctor</small><b>{patient.doctor}</b></div></div>
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+              </section>
+            </>
+          )}
+
+          {/* ── Resources ── */}
+          {(isDashboard || active === "Resources") && (
+            <section className="section-block">
+              <SectionHeader title="Resource Utilization" subtitle="Capacity across critical hospital resources" />
+              <div className="resource-grid">
+                {resources.map((resource) => (
+                  <ResourceCard key={resource.name} resource={resource} onClick={setSelectedResource} />
                 ))}
               </div>
-            </Panel>
-          </section>
+            </section>
+          )}
 
-          <section className="section-block">
-            <SectionHeader title="Resource Utilization" subtitle="Capacity across critical hospital resources" />
-            <div className="resource-grid">
-              {resources.map((resource) => (
-                <ResourceCard key={resource.name} resource={resource} onClick={setSelectedResource} />
-              ))}
-            </div>
-          </section>
-
-          <section className="two-col section-block">
-            <div>
+          {/* ── Analytics ── */}
+          {(isDashboard || active === "Analytics") && (
+            <section className="section-block">
               <SectionHeader title="System Performance" subtitle="Waiting time and resource utilization over simulation time" />
               <Panel className="chart-panel">
                 <div className="chart-legend"><span><i className="legend-line wait" /> Avg waiting time</span><span><i className="legend-line util" /> Utilization</span></div>
@@ -355,9 +509,12 @@ function App() {
                   </AreaChart>
                 </ResponsiveContainer>
               </Panel>
-            </div>
+            </section>
+          )}
 
-            <div>
+          {/* ── Strategy ── */}
+          {(isDashboard || active === "Strategy") && (
+            <section className="section-block">
               <SectionHeader title="Strategy Comparison" subtitle="Compare allocation policies" />
               <Panel className="strategy-panel">
                 {strategies.map((item) => (
@@ -367,62 +524,70 @@ function App() {
                   </button>
                 ))}
               </Panel>
-            </div>
-          </section>
+            </section>
+          )}
 
-          <section className="section-block">
-            <SectionHeader title="Scenario Controls" subtitle="Test operational conditions and failure modes" />
-            <div className="scenario-grid">
-              <ScenarioButton title="Emergency Surge" text="Simulate sudden patient influx" icon={<Zap />} onClick={() => activateScenario("Emergency Surge")} />
-              <ScenarioButton title="Staff Shortage" text="Reduce available clinical staff" icon={<Users />} onClick={() => activateScenario("Staff Shortage")} />
-              <ScenarioButton title="Resource Failure" text="Take a critical resource offline" icon={<ShieldCheck />} onClick={() => activateScenario("Resource Failure")} />
-              <ScenarioButton title="Normal Operations" text="Restore baseline conditions" icon={<CheckCircle2 />} onClick={() => activateScenario("Normal Operations")} />
-            </div>
-          </section>
-
-          <section className="section-block">
-            <SectionHeader title="Demo Scenarios" subtitle="Quick-start cases for evaluating the simulator" />
-            <div className="demo-grid">
-              {["Queue Jump", "ICU Contention", "Starvation", "Surge Demo", "Full Demo"].map((name) => (
-                <button className="demo-btn" key={name} onClick={() => activateScenario(name)}>
-                  <span>{name}</span><ChevronRight size={17} />
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="two-col section-block">
-            <div>
-              <SectionHeader title="System Integrity" subtitle="Capacity and operational constraints" />
-              <Panel>
-                <div className="integrity-row"><span><CheckCircle2 size={18} /> Capacity violations</span><strong className="ok">0</strong></div>
-                <div className="integrity-row"><span><CheckCircle2 size={18} /> Resource conflicts</span><strong className="ok">0</strong></div>
-                <div className="integrity-row"><span><CheckCircle2 size={18} /> Starvation cases</span><strong>1</strong></div>
-              </Panel>
-            </div>
-            <div>
-              <SectionHeader title="Live Event Feed" subtitle="Latest simulation events" />
-              <Panel className="events-panel">
-                <div className="event-toolbar">
-                  <select value={eventFilter} onChange={(e) => setEventFilter(e.target.value)}>
-                    <option value="ALL">All events</option>
-                    <option value="ASSIGNED">Assigned</option>
-                    <option value="ARRIVAL">Arrival</option>
-                    <option value="DISCHARGED">Discharged</option>
-                    <option value="RESOURCE_FAILURE">Resource failure</option>
-                    <option value="RECOVERY">Recovery</option>
-                  </select>
-                  <button className="export-btn" onClick={exportEvents}><Download size={15} /> Export</button>
+          {/* ── Scenarios ── */}
+          {(isDashboard || active === "Scenarios") && (
+            <>
+              <section className="section-block">
+                <SectionHeader title="Scenario Controls" subtitle="Test operational conditions and failure modes" />
+                <div className="scenario-grid">
+                  <ScenarioButton title="Emergency Surge" text="Simulate sudden patient influx" icon={<Zap />} onClick={() => activateScenario("Emergency Surge")} />
+                  <ScenarioButton title="Staff Shortage" text="Reduce available clinical staff" icon={<Users />} onClick={() => activateScenario("Staff Shortage")} />
+                  <ScenarioButton title="Resource Failure" text="Take a critical resource offline" icon={<ShieldCheck />} onClick={() => activateScenario("Resource Failure")} />
+                  <ScenarioButton title="Normal Operations" text="Restore baseline conditions" icon={<CheckCircle2 />} onClick={() => activateScenario("Normal Operations")} />
                 </div>
-                {filteredEvents.slice(0, 5).map((event) => (
-                  <div className="event-row" key={event.id}>
-                    <span className={`event-badge ${event.type.toLowerCase()}`}>{event.type.replace("_", " ")}</span>
-                    <span className="event-text">{event.text}</span><time>{event.time}</time>
+              </section>
+
+              <section className="section-block">
+                <SectionHeader title="Demo Scenarios" subtitle="Quick-start cases for evaluating the simulator" />
+                <div className="demo-grid">
+                  {["Queue Jump", "ICU Contention", "Starvation", "Surge Demo", "Full Demo"].map((name) => (
+                    <button className="demo-btn" key={name} onClick={() => activateScenario(name)}>
+                      <span>{name}</span><ChevronRight size={17} />
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </>
+          )}
+
+          {/* ── Event Log ── */}
+          {(isDashboard || active === "Event Log") && (
+            <section className="two-col section-block">
+              <div>
+                <SectionHeader title="System Integrity" subtitle="Capacity and operational constraints" />
+                <Panel>
+                  <div className="integrity-row"><span><CheckCircle2 size={18} /> Capacity violations</span><strong className="ok">0</strong></div>
+                  <div className="integrity-row"><span><CheckCircle2 size={18} /> Resource conflicts</span><strong className="ok">0</strong></div>
+                  <div className="integrity-row"><span><CheckCircle2 size={18} /> Starvation cases</span><strong>1</strong></div>
+                </Panel>
+              </div>
+              <div>
+                <SectionHeader title="Live Event Feed" subtitle="Latest simulation events" />
+                <Panel className="events-panel">
+                  <div className="event-toolbar">
+                    <select value={eventFilter} onChange={(e) => setEventFilter(e.target.value)}>
+                      <option value="ALL">All events</option>
+                      <option value="ASSIGNED">Assigned</option>
+                      <option value="ARRIVAL">Arrival</option>
+                      <option value="DISCHARGED">Discharged</option>
+                      <option value="RESOURCE_FAILURE">Resource failure</option>
+                      <option value="RECOVERY">Recovery</option>
+                    </select>
+                    <button className="export-btn" onClick={exportEvents}><Download size={15} /> Export</button>
                   </div>
-                ))}
-              </Panel>
-            </div>
-          </section>
+                  {filteredEvents.slice(0, 5).map((event) => (
+                    <div className="event-row" key={event.id}>
+                      <span className={`event-badge ${event.type.toLowerCase()}`}>{event.type.replace("_", " ")}</span>
+                      <span className="event-text">{event.text}</span><time>{event.time}</time>
+                    </div>
+                  ))}
+                </Panel>
+              </div>
+            </section>
+          )}
 
           <footer>
             <div><div className="brand-mark small"><HeartPulse size={19} /></div><strong>VITALIS</strong><span>Hospital Resource Intelligence</span></div>
